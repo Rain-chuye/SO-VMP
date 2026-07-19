@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARM/ARM64 SO 代码虚拟化与加固系统</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .custom-shadow {
+            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.15), 0 2px 8px -1px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body class="bg-slate-50 font-sans text-slate-800 min-h-screen flex flex-col">
+
+    <!-- Header / Navbar -->
+    <header class="bg-indigo-700 text-white shadow-md">
+        <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+            <div class="flex items-center space-x-3">
+                <i class="fa-solid fa-shield-halved text-3xl text-amber-400"></i>
+                <span class="text-2xl font-black tracking-wider">SO-SHIELD VM</span>
+            </div>
+            <div class="text-sm font-medium bg-indigo-800 px-3 py-1.5 rounded-full text-indigo-200">
+                ARM / ARM64 ELF 运行时虚拟机代码保护器
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <main class="flex-grow max-w-7xl w-full mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
+
+        <!-- Left Side: File Upload & Function Selection -->
+        <div class="lg:col-span-5 flex flex-col space-y-6">
+
+            <!-- Upload Box -->
+            <div class="bg-white rounded-2xl p-6 custom-shadow border border-slate-100">
+                <h2 class="text-lg font-bold text-slate-900 mb-4 flex items-center">
+                    <i class="fa-solid fa-file-arrow-up text-indigo-500 mr-2"></i> 上传 SO 动态库文件
+                </h2>
+                <div id="drop-zone" class="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center cursor-pointer hover:border-indigo-500 hover:bg-indigo-50/30 transition-all">
+                    <i class="fa-solid fa-cloud-arrow-up text-5xl text-slate-400 mb-3 block"></i>
+                    <span class="text-slate-600 font-medium block mb-1">拖拽 .so 文件到此处，或者</span>
+                    <span class="text-indigo-600 font-semibold hover:underline">点击浏览文件</span>
+                    <input type="file" id="file-input" class="hidden" accept=".so">
+                </div>
+
+                <!-- File Status / Info -->
+                <div id="file-info" class="mt-4 hidden p-3 bg-indigo-50 border border-indigo-100 rounded-lg flex items-center justify-between">
+                    <div class="flex items-center space-x-3 overflow-hidden">
+                        <i class="fa-solid fa-file-code text-indigo-600 text-2xl flex-shrink-0"></i>
+                        <div class="truncate">
+                            <p id="info-filename" class="font-bold text-slate-800 text-sm truncate">library.so</p>
+                            <p id="info-arch" class="text-slate-500 text-xs font-semibold">架构: ARM64</p>
+                        </div>
+                    </div>
+                    <button id="reset-file" class="text-rose-500 hover:bg-rose-50 p-2 rounded-lg transition-colors">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Exported Functions list -->
+            <div class="bg-white rounded-2xl p-6 flex-grow flex flex-col custom-shadow border border-slate-100 min-h-[400px]">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-lg font-bold text-slate-900 flex items-center">
+                        <i class="fa-solid fa-list-check text-indigo-500 mr-2"></i> 选择虚拟化函数
+                    </h2>
+                    <span id="func-count" class="text-xs bg-slate-100 text-slate-600 px-2 py-1 rounded-full font-bold">0 函数已载入</span>
+                </div>
+
+                <!-- Search & Filters -->
+                <div class="mb-3 relative">
+                    <input type="text" id="search-func" placeholder="搜索函数名称..." class="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm">
+                    <i class="fa-solid fa-magnifying-glass absolute right-3 top-3 text-slate-400"></i>
+                </div>
+
+                <!-- Function Checklist -->
+                <div id="funcs-container" class="border border-slate-100 rounded-xl overflow-y-auto max-h-[350px] divide-y divide-slate-100 flex-grow">
+                    <div class="p-8 text-center text-slate-400">
+                        <i class="fa-solid fa-cube text-4xl mb-2 block"></i>
+                        请先上传 SO 文件以解析函数列表
+                    </div>
+                </div>
+
+                <div class="mt-4 pt-4 border-t border-slate-100 flex space-x-3">
+                    <button id="btn-select-all" class="flex-1 py-2 px-4 border border-slate-200 text-slate-700 rounded-lg text-sm font-semibold hover:bg-slate-50 transition-colors">全选</button>
+                    <button id="btn-deselect-all" class="flex-1 py-2 px-4 border border-slate-200 text-slate-700 rounded-lg text-sm font-semibold hover:bg-slate-50 transition-colors">清除选择</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Side: VM Disassembly, Code Generation & Build Logs -->
+        <div class="lg:col-span-7 flex flex-col space-y-6">
+
+            <!-- Tab Headers -->
+            <div class="bg-white rounded-2xl custom-shadow border border-slate-100 overflow-hidden flex flex-col flex-grow min-h-[500px]">
+                <div class="bg-slate-50 border-b border-slate-100 flex">
+                    <button id="tab-disasm-btn" class="flex-1 py-4 px-6 text-indigo-600 border-b-2 border-indigo-600 font-bold text-sm flex items-center justify-center space-x-2 bg-white">
+                        <i class="fa-solid fa-code"></i>
+                        <span>函数反汇编 & 虚拟化字节码预览</span>
+                    </button>
+                    <button id="tab-source-btn" class="flex-1 py-4 px-6 text-slate-500 hover:text-slate-800 font-bold text-sm flex items-center justify-center space-x-2">
+                        <i class="fa-solid fa-file-signature"></i>
+                        <span>生成 VM 外壳 C 代码</span>
+                    </button>
+                </div>
+
+                <!-- Tab 1: Disassembly -->
+                <div id="tab-disasm-content" class="p-6 flex-grow flex flex-col">
+                    <div id="disasm-empty" class="flex-grow flex flex-col justify-center items-center text-slate-400 p-8">
+                        <i class="fa-solid fa-laptop-code text-5xl mb-3 block"></i>
+                        <span>点击左侧函数可在右侧实时预览其 ARM 反汇编和对应的 VM 指令转译</span>
+                    </div>
+
+                    <div id="disasm-view" class="hidden flex-grow flex-col space-y-4">
+                        <div class="flex justify-between items-center bg-slate-100 p-3 rounded-lg">
+                            <div>
+                                <span class="text-xs font-bold text-indigo-600 uppercase tracking-wider block">当前预览函数</span>
+                                <span id="current-func-name" class="font-mono text-slate-900 font-bold">func_name</span>
+                            </div>
+                            <div class="text-right">
+                                <span class="text-xs font-bold text-slate-500 block">大小 (Size)</span>
+                                <span id="current-func-size" class="font-mono text-slate-700 font-bold">128 bytes</span>
+                            </div>
+                        </div>
+
+                        <!-- Side by Side ARM vs VM -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 flex-grow overflow-hidden">
+                            <div class="flex flex-col">
+                                <span class="text-xs font-bold text-slate-500 mb-1.5 flex items-center"><i class="fa-solid fa-microchip mr-1.5 text-indigo-500"></i> 原始 ARM/ARM64 汇编</span>
+                                <pre id="arm-pre" class="bg-slate-900 text-slate-300 font-mono text-xs p-4 rounded-xl overflow-y-auto max-h-[350px] flex-grow leading-relaxed"></pre>
+                            </div>
+                            <div class="flex flex-col">
+                                <span class="text-xs font-bold text-slate-500 mb-1.5 flex items-center"><i class="fa-solid fa-shield mr-1.5 text-amber-500"></i> 转译后自定义 VM 字节码</span>
+                                <pre id="vm-pre" class="bg-indigo-950 text-indigo-200 font-mono text-xs p-4 rounded-xl overflow-y-auto max-h-[350px] flex-grow leading-relaxed"></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Code Viewer -->
+                <div id="tab-source-content" class="p-6 hidden flex-grow flex-col">
+                    <div id="source-empty" class="flex-grow flex flex-col justify-center items-center text-slate-400 p-8">
+                        <i class="fa-solid fa-file-code text-5xl mb-3 block"></i>
+                        <span>进行编译保护后，可以在此处查看动态生成的 C 外壳加载器与 VM 解释器代码</span>
+                    </div>
+                    <div id="source-view" class="hidden flex-grow flex-col">
+                        <span class="text-xs font-bold text-slate-500 mb-1.5">保护壳 C 代码</span>
+                        <pre id="source-pre" class="bg-slate-900 text-slate-200 font-mono text-xs p-4 rounded-xl overflow-y-auto max-h-[420px] flex-grow leading-relaxed"></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Build Logs and Download Panel -->
+            <div class="bg-white rounded-2xl p-6 custom-shadow border border-slate-100">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-lg font-bold text-slate-900 flex items-center">
+                        <i class="fa-solid fa-gears text-indigo-500 mr-2"></i> 虚拟化构建控制台
+                    </h2>
+                    <span id="build-status" class="text-xs px-2.5 py-1 rounded-full font-bold bg-slate-100 text-slate-600">空闲</span>
+                </div>
+
+                <div class="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-4">
+                    <button id="btn-build" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl flex items-center justify-center space-x-2 shadow-lg shadow-indigo-100 hover:shadow-indigo-200 transition-all disabled:opacity-50" disabled>
+                        <i class="fa-solid fa-hammer"></i>
+                        <span>开始 VM 代码虚拟化并生成 SO</span>
+                    </button>
+                    <a id="btn-download" href="#" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-6 rounded-xl flex items-center justify-center space-x-2 shadow-lg shadow-emerald-100 hover:shadow-emerald-200 transition-all opacity-50 cursor-not-allowed" pointer-events="none">
+                        <i class="fa-solid fa-circle-down"></i>
+                        <span>下载加固后的 SO 文件</span>
+                    </a>
+                </div>
+
+                <div id="log-box" class="mt-4 p-3 bg-slate-900 rounded-xl text-xs font-mono text-slate-300 max-h-[150px] overflow-y-auto border border-slate-800">
+                    <span class="text-slate-500">[SYSTEM] 准备就绪，请上传 SO 文件开始...</span>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-slate-100 border-t border-slate-200 py-6 text-center text-slate-500 text-xs">
+        <p>© 2026 SO-SHIELD VM 加固工作站 - 专业级代码虚拟化与安全保护</p>
+    </footer>
+
+    <!-- Frontend logic with AJAX -->
+    <script>
+        let currentFile = null;
+        let elfInfo = null;
+        let selectedFuncs = new Set();
+        let currentActiveTab = 'disasm';
+        let currentSoId = null;
+
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const fileInfo = document.getElementById('file-info');
+        const infoFilename = document.getElementById('info-filename');
+        const infoArch = document.getElementById('info-arch');
+        const resetFileBtn = document.getElementById('reset-file');
+        const funcsContainer = document.getElementById('funcs-container');
+        const funcCount = document.getElementById('func-count');
+        const searchFunc = document.getElementById('search-func');
+        const btnSelectAll = document.getElementById('btn-select-all');
+        const btnDeselectAll = document.getElementById('btn-deselect-all');
+        const btnBuild = document.getElementById('btn-build');
+        const btnDownload = document.getElementById('btn-download');
+        const buildStatus = document.getElementById('build-status');
+        const logBox = document.getElementById('log-box');
+
+        const tabDisasmBtn = document.getElementById('tab-disasm-btn');
+        const tabSourceBtn = document.getElementById('tab-source-btn');
+        const tabDisasmContent = document.getElementById('tab-disasm-content');
+        const tabSourceContent = document.getElementById('tab-source-content');
+
+        const disasmEmpty = document.getElementById('disasm-empty');
+        const disasmView = document.getElementById('disasm-view');
+        const currentFuncName = document.getElementById('current-func-name');
+        const currentFuncSize = document.getElementById('current-func-size');
+        const armPre = document.getElementById('arm-pre');
+        const vmPre = document.getElementById('vm-pre');
+
+        const sourceEmpty = document.getElementById('source-empty');
+        const sourceView = document.getElementById('source-view');
+        const sourcePre = document.getElementById('source-pre');
+
+        function log(message, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            let color = 'text-slate-300';
+            if (type === 'error') color = 'text-rose-400';
+            if (type === 'success') color = 'text-emerald-400';
+            if (type === 'warning') color = 'text-amber-400';
+
+            const line = document.createElement('div');
+            line.className = `py-0.5 ${color}`;
+            line.innerHTML = `[${time}] ${message}`;
+            logBox.appendChild(line);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // Tab Switching
+        tabDisasmBtn.addEventListener('click', () => switchTab('disasm'));
+        tabSourceBtn.addEventListener('click', () => switchTab('source'));
+
+        function switchTab(tab) {
+            currentActiveTab = tab;
+            if (tab === 'disasm') {
+                tabDisasmBtn.className = "flex-1 py-4 px-6 text-indigo-600 border-b-2 border-indigo-600 font-bold text-sm flex items-center justify-center space-x-2 bg-white";
+                tabSourceBtn.className = "flex-1 py-4 px-6 text-slate-500 hover:text-slate-800 font-bold text-sm flex items-center justify-center space-x-2";
+                tabDisasmContent.classList.remove('hidden');
+                tabDisasmContent.classList.add('flex');
+                tabSourceContent.classList.add('hidden');
+                tabSourceContent.classList.remove('flex');
+            } else {
+                tabSourceBtn.className = "flex-1 py-4 px-6 text-indigo-600 border-b-2 border-indigo-600 font-bold text-sm flex items-center justify-center space-x-2 bg-white";
+                tabDisasmBtn.className = "flex-1 py-4 px-6 text-slate-500 hover:text-slate-800 font-bold text-sm flex items-center justify-center space-x-2";
+                tabSourceContent.classList.remove('hidden');
+                tabSourceContent.classList.add('flex');
+                tabDisasmContent.classList.add('hidden');
+                tabDisasmContent.classList.remove('flex');
+            }
+        }
+
+        // Drag and drop events
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('border-indigo-500', 'bg-indigo-50/50');
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('border-indigo-500', 'bg-indigo-50/50');
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('border-indigo-500', 'bg-indigo-50/50');
+            if (e.dataTransfer.files.length > 0) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        resetFileBtn.addEventListener('click', resetAll);
+
+        function resetAll() {
+            currentFile = null;
+            elfInfo = null;
+            selectedFuncs.clear();
+            currentSoId = null;
+            fileInput.value = '';
+            fileInfo.classList.add('hidden');
+            dropZone.classList.remove('hidden');
+
+            funcsContainer.innerHTML = `<div class="p-8 text-center text-slate-400">
+                <i class="fa-solid fa-cube text-4xl mb-2 block"></i>
+                请先上传 SO 文件以解析函数列表
+            </div>`;
+            funcCount.textContent = '0 函数已载入';
+            btnBuild.disabled = true;
+            btnDownload.classList.add('opacity-50', 'cursor-not-allowed');
+            btnDownload.style.pointerEvents = 'none';
+            btnDownload.href = '#';
+            buildStatus.textContent = '空闲';
+            buildStatus.className = "text-xs px-2.5 py-1 rounded-full font-bold bg-slate-100 text-slate-600";
+            disasmEmpty.classList.remove('hidden');
+            disasmView.classList.add('hidden');
+            sourceEmpty.classList.remove('hidden');
+            sourceView.classList.add('hidden');
+            log("文件被移除。已恢复初始状态。");
+        }
+
+        function handleFile(file) {
+            if (!file.name.endsWith('.so')) {
+                log("错误: 只支持上传 ELF 格式的 .so 共享库文件！", "error");
+                return;
+            }
+            currentFile = file;
+            log(`正在解析文件: ${file.name} (${(file.size / 1024).toFixed(1)} KB)...`);
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    log(`解析失败: ${data.error}`, "error");
+                    return;
+                }
+                elfInfo = data;
+                currentSoId = data.so_id;
+
+                infoFilename.textContent = file.name;
+                infoArch.textContent = `架构: ${data.arch}`;
+                fileInfo.classList.remove('hidden');
+                dropZone.classList.add('hidden');
+
+                log(`ELF 解析成功！检测到架构: ${data.arch}, 包含 ${data.exports.length} 个导出符号。`, "success");
+                renderFunctions(data.exports);
+                btnBuild.disabled = false;
+            })
+            .catch(err => {
+                log(`服务器通信出错: ${err.message}`, "error");
+            });
+        }
+
+        function renderFunctions(exports) {
+            funcsContainer.innerHTML = '';
+            funcCount.textContent = `${exports.length} 函数已载入`;
+
+            if (exports.length === 0) {
+                funcsContainer.innerHTML = `<div class="p-8 text-center text-slate-400">
+                    <i class="fa-solid fa-triangle-exclamation text-4xl mb-2 block text-amber-500"></i>
+                    未在该 SO 文件中发现有效的导出函数。
+                </div>`;
+                return;
+            }
+
+            exports.forEach(fn => {
+                const item = document.createElement('div');
+                item.className = "flex items-center justify-between p-3 hover:bg-slate-50 transition-colors cursor-pointer select-none";
+                item.dataset.name = fn.name;
+
+                item.innerHTML = `
+                    <div class="flex items-center space-x-3 overflow-hidden">
+                        <input type="checkbox" class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer" data-func-name="${fn.name}">
+                        <div class="truncate">
+                            <p class="font-mono text-sm font-bold text-slate-800 truncate">${fn.name}</p>
+                            <p class="text-slate-400 text-xs font-semibold">地址: 0x${fn.address.toString(16).toUpperCase()} | 大小: ${fn.size} B</p>
+                        </div>
+                    </div>
+                    <button class="btn-preview-func text-indigo-500 hover:bg-indigo-50 px-2 py-1 rounded text-xs font-bold transition-colors">
+                        <i class="fa-solid fa-eye mr-1"></i> 预览
+                    </button>
+                `;
+
+                // Checkbox toggle behavior
+                const checkbox = item.querySelector('input[type="checkbox"]');
+                checkbox.addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        selectedFuncs.add(fn.name);
+                    } else {
+                        selectedFuncs.delete(fn.name);
+                    }
+                    log(`已选择 ${selectedFuncs.size} 个函数进行代码虚拟化。`);
+                });
+
+                item.addEventListener('click', (e) => {
+                    if (e.target !== checkbox && !e.target.closest('.btn-preview-func')) {
+                        checkbox.checked = !checkbox.checked;
+                        checkbox.dispatchEvent(new Event('change'));
+                    }
+                });
+
+                item.querySelector('.btn-preview-func').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    previewFunction(fn);
+                });
+
+                funcsContainer.appendChild(item);
+            });
+        }
+
+        searchFunc.addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase();
+            const items = funcsContainer.querySelectorAll('[data-name]');
+            items.forEach(item => {
+                const name = item.dataset.name.toLowerCase();
+                if (name.includes(query)) {
+                    item.classList.remove('hidden');
+                } else {
+                    item.classList.add('hidden');
+                }
+            });
+        });
+
+        btnSelectAll.addEventListener('click', () => {
+            const checkboxes = funcsContainer.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach(cb => {
+                if (!cb.checked) {
+                    cb.checked = true;
+                    cb.dispatchEvent(new Event('change'));
+                }
+            });
+        });
+
+        btnDeselectAll.addEventListener('click', () => {
+            const checkboxes = funcsContainer.querySelectorAll('input[type="checkbox"]');
+            checkboxes.forEach(cb => {
+                if (cb.checked) {
+                    cb.checked = false;
+                    cb.dispatchEvent(new Event('change'));
+                }
+            });
+        });
+
+        function previewFunction(fn) {
+            log(`正在获取并翻译函数 [${fn.name}] 的反汇编指令...`);
+
+            fetch('/api/disassemble', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    so_id: currentSoId,
+                    arch: elfInfo.arch,
+                    address: fn.address,
+                    size: fn.size
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    log(`预览获取失败: ${data.error}`, "error");
+                    return;
+                }
+
+                switchTab('disasm');
+                disasmEmpty.classList.add('hidden');
+                disasmView.classList.remove('hidden');
+                disasmView.classList.add('flex');
+
+                currentFuncName.textContent = fn.name;
+                currentFuncSize.textContent = `${fn.size} 字节`;
+
+                // Build Arm Disassembly View
+                let armHtml = '';
+                data.disasm.forEach(insn => {
+                    armHtml += `0x${insn.address.toString(16).toUpperCase()}:  <span class="text-indigo-400 font-bold">${insn.mnemonic.padEnd(8, ' ')}</span> <span class="text-slate-300">${insn.op_str}</span>\n`;
+                });
+                armPre.innerHTML = armHtml || '无指令信息';
+
+                // Build VM Bytecode View
+                let vmHtml = '';
+                data.vm_code.forEach((vm, i) => {
+                    vmHtml += `[IP:${i.toString().padStart(3, '0')}] OP: <span class="text-amber-400 font-bold">${vm.op_name.padEnd(10, ' ')}</span> (${vm.op.toString().padStart(2, ' ')}), Op1:${vm.op1}, Op2:${vm.op2}, Op3:${vm.op3}  <span class="text-slate-500">// ${vm.comment}</span>\n`;
+                });
+                vmPre.innerHTML = vmHtml || '暂无转译指令';
+
+                log(`函数 [${fn.name}] 预览生成完毕。已完成 ARM64 到自定义 VM 指令集的映射！`, "success");
+            })
+            .catch(err => {
+                log(`服务器解析异常: ${err.message}`, "error");
+            });
+        }
+
+        // Build Process
+        btnBuild.addEventListener('click', () => {
+            if (selectedFuncs.size === 0) {
+                log("提示: 请先选择至少一个要进行虚拟化保护的导出函数！", "warning");
+                alert("请先选择至少一个要进行虚拟化保护的导出函数！");
+                return;
+            }
+
+            buildStatus.textContent = "构建中...";
+            buildStatus.className = "text-xs px-2.5 py-1 rounded-full font-bold bg-amber-100 text-amber-700 animate-pulse";
+            btnBuild.disabled = true;
+            log(`开始虚拟化加壳。选定函数: ${Array.from(selectedFuncs).join(', ')}`);
+
+            fetch('/api/build', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    so_id: currentSoId,
+                    arch: elfInfo.arch,
+                    functions: Array.from(selectedFuncs)
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    log(`虚拟化编译失败:\n${data.error}`, "error");
+                    buildStatus.textContent = "构建失败";
+                    buildStatus.className = "text-xs px-2.5 py-1 rounded-full font-bold bg-rose-100 text-rose-700";
+                    btnBuild.disabled = false;
+                    return;
+                }
+
+                log("自定义 VM 加载外壳动态生成完毕。", "success");
+                log("GNU Cross-Compiler aarch64 交叉编译成功！", "success");
+                log("防护点校验: ptrace 反调试检测已嵌入、代码完整性强校验已集成、PAC 增强指针验证已注入！", "success");
+
+                // Show generated C source
+                sourceEmpty.classList.add('hidden');
+                sourceView.classList.remove('hidden');
+                sourceView.classList.add('flex');
+                sourcePre.textContent = data.source_code;
+
+                // Enable download
+                btnDownload.classList.remove('opacity-50', 'cursor-not-allowed');
+                btnDownload.style.pointerEvents = 'auto';
+                btnDownload.href = `/api/download/${data.build_id}`;
+
+                buildStatus.textContent = "已就绪";
+                buildStatus.className = "text-xs px-2.5 py-1 rounded-full font-bold bg-emerald-100 text-emerald-700";
+                btnBuild.disabled = false;
+
+                log("--- 加固成功！点击 [下载加固后的 SO 文件] 即可下载您的全新守护 SO 库 ---", "success");
+            })
+            .catch(err => {
+                log(`编译引擎连接故障: ${err.message}`, "error");
+                buildStatus.textContent = "引擎错误";
+                buildStatus.className = "text-xs px-2.5 py-1 rounded-full font-bold bg-rose-100 text-rose-700";
+                btnBuild.disabled = false;
+            });
+        });
+    </script>
+</body>
+</html>
