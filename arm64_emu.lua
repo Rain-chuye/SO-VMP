@@ -1,6 +1,6 @@
--- ARM64 (AArch64) Instruction Emulator in pure Lua 5.3
+-- ARM64 (AArch64) Instruction Emulator and ELF Loader in pure Lua 5.3
 -- Supports key registers, memory state, and instruction parsing for:
--- ADD, SUB, LDR, STR, CMP, B, B.cond (B.EQ, B.NE, B.LT, B.GT), CBZ, CBNZ, BL, RET
+-- ADD, SUB, LDR, STR, CMP, B, B.cond (B.EQ, B.NE, B.LT, B.GT, B.LE, B.GE), CBZ, CBNZ, BL, RET
 
 local arm64 = {}
 
@@ -9,7 +9,7 @@ function arm64.new_cpu()
     local cpu = {
         regs = {},       -- x0 to x30 registers (64-bit values)
         sp = 0x7FFF0000, -- stack pointer
-        pc = 0,          -- program counter (byte index or relative offset)
+        pc = 0,          -- program counter
         memory = {},     -- Simulated memory hash table key=address, value=uint8
         cpsr = {         -- Condition Flags
             Z = false,   -- Zero Flag
@@ -66,7 +66,140 @@ function arm64.new_cpu()
     return cpu
 end
 
--- Decodes 32-bit ARM64 machine instruction word
+-- ELF64 Shared Library (.so) Parser in Pure Lua
+function arm64.load_elf_so(filepath)
+    local f = io.open(filepath, "rb")
+    if not f then
+        return nil, "Failed to open file: " .. tostring(filepath)
+    end
+
+    local content = f:read("*a")
+    f:close()
+
+    -- Verify magic bytes
+    if #content < 64 then
+        return nil, "File too small for ELF64"
+    end
+
+    local magic = content:sub(1, 4)
+    if magic ~= "\x7fELF" then
+        return nil, "Invalid ELF magic"
+    end
+
+    local class = string.unpack("<I1", content, 5)
+    if class ~= 2 then
+        return nil, "Not a 64-bit ELF file"
+    end
+
+    local machine = string.unpack("<I2", content, 19)
+    if machine ~= 183 then -- 0xB7 for AArch64
+        return nil, "Not an AArch64 (ARM64) ELF file (machine=" .. tostring(machine) .. ")"
+    end
+
+    local e_phoff = string.unpack("<I8", content, 33)
+    local e_shoff = string.unpack("<I8", content, 41)
+    local e_phnum = string.unpack("<I2", content, 57)
+    local e_shentsize = string.unpack("<I2", content, 59)
+    local e_shnum = string.unpack("<I2", content, 61)
+    local e_shstrndx = string.unpack("<I2", content, 63)
+
+    -- 1. Parse PT_LOAD segments to resolve virtual addresses to file offsets
+    local segments = {}
+    for i = 0, e_phnum - 1 do
+        local ph_offset = e_phoff + i * 56 + 1
+        local p_type = string.unpack("<I4", content, ph_offset)
+        if p_type == 1 then -- PT_LOAD
+            local p_offset = string.unpack("<I8", content, ph_offset + 8)
+            local p_vaddr = string.unpack("<I8", content, ph_offset + 16)
+            local p_filesz = string.unpack("<I8", content, ph_offset + 32)
+            local p_memsz = string.unpack("<I8", content, ph_offset + 40)
+            table.insert(segments, {
+                offset = p_offset,
+                vaddr = p_vaddr,
+                filesz = p_filesz,
+                memsz = p_memsz
+            })
+        end
+    end
+
+    local function vaddr_to_offset(vaddr)
+        for _, seg in ipairs(segments) do
+            if vaddr >= seg.vaddr and vaddr < seg.vaddr + seg.memsz then
+                return seg.offset + (vaddr - seg.vaddr)
+            end
+        end
+        return vaddr -- Fallback
+    end
+
+    -- 2. Find .dynsym and .dynstr sections
+    -- Read .shstrtab section header to resolve section names
+    local shstr_offset = e_shoff + e_shstrndx * e_shentsize + 1
+    local shstr_sec_offset = string.unpack("<I8", content, shstr_offset + 24)
+    local shstr_sec_size = string.unpack("<I8", content, shstr_offset + 32)
+    local shstrtab = content:sub(shstr_sec_offset + 1, shstr_sec_offset + shstr_sec_size)
+
+    local function get_string(tab, offset)
+        local end_idx = tab:find("\0", offset + 1)
+        if not end_idx then return tab:sub(offset + 1) end
+        return tab:sub(offset + 1, end_idx - 1)
+    end
+
+    local dynsym_offset, dynsym_size, dynsym_entsize
+    local dynstr_sec_offset, dynstr_sec_size
+
+    for i = 0, e_shnum - 1 do
+        local sec_offset = e_shoff + i * e_shentsize + 1
+        local sh_name_idx = string.unpack("<I4", content, sec_offset)
+        local name = get_string(shstrtab, sh_name_idx)
+
+        local sh_type = string.unpack("<I4", content, sec_offset + 4)
+        if sh_type == 11 then -- SHT_DYNSYM
+            dynsym_offset = string.unpack("<I8", content, sec_offset + 24)
+            dynsym_size = string.unpack("<I8", content, sec_offset + 32)
+            dynsym_entsize = string.unpack("<I8", content, sec_offset + 56) or 24
+        elseif sh_type == 3 and name == ".dynstr" then -- SHT_STRTAB
+            dynstr_sec_offset = string.unpack("<I8", content, sec_offset + 24)
+            dynstr_sec_size = string.unpack("<I8", content, sec_offset + 32)
+        end
+    end
+
+    if not dynsym_offset or not dynstr_sec_offset then
+        return nil, "Could not find .dynsym or .dynstr sections"
+    end
+
+    local dynstr = content:sub(dynstr_sec_offset + 1, dynstr_sec_offset + dynstr_sec_size)
+
+    -- 3. Extract Exported functions
+    local exports = {}
+    local num_syms = dynsym_size / dynsym_entsize
+    for i = 0, num_syms - 1 do
+        local sym_offset = dynsym_offset + i * dynsym_entsize + 1
+        local st_name_idx = string.unpack("<I4", content, sym_offset)
+        local name = get_string(dynstr, st_name_idx)
+
+        local st_info = string.unpack("<I1", content, sym_offset + 4)
+        local st_type = st_info & 0xF
+        local st_value = string.unpack("<I8", content, sym_offset + 8)
+        local st_size = string.unpack("<I8", content, sym_offset + 16)
+
+        -- We want function symbols with valid addresses and sizes
+        if name ~= "" and (st_type == 2 or st_type == 0) and st_value > 0 and st_size > 0 then
+            local file_offset = vaddr_to_offset(st_value)
+            local raw_bytes = content:sub(file_offset + 1, file_offset + st_size)
+            exports[name] = {
+                name = name,
+                vaddr = st_value,
+                size = st_size,
+                file_offset = file_offset,
+                bytes = raw_bytes
+            }
+        end
+    end
+
+    return exports, nil
+end
+
+-- Decodes a 32-bit ARM64 machine instruction word
 function arm64.decode_binary_word(word)
     local sf = (word >> 31) & 1
     local op = (word >> 30) & 1
@@ -248,6 +381,20 @@ function arm64.step(cpu, insn)
 
     elseif op == "B.GT" then
         if not cpu.cpsr.Z and not cpu.cpsr.N then
+            cpu.pc = cpu.pc + op1
+        else
+            cpu.pc = cpu.pc + 4
+        end
+
+    elseif op == "B.LE" then
+        if cpu.cpsr.Z or cpu.cpsr.N then
+            cpu.pc = cpu.pc + op1
+        else
+            cpu.pc = cpu.pc + 4
+        end
+
+    elseif op == "B.GE" then
+        if not cpu.cpsr.N then
             cpu.pc = cpu.pc + op1
         else
             cpu.pc = cpu.pc + 4
