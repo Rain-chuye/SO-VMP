@@ -33,11 +33,12 @@ def generate_virtualized_so(arch: str, selected_funcs: list, original_so_path: s
         inst_lines = []
         for inst in instructions:
             op = inst['op']
+            size = inst['size']
             op1 = inst['op1']
             op2 = inst['op2']
             op3 = inst['op3']
             comment = inst['comment'].replace("*/", "* /") # prevent nested comments
-            inst_lines.append(f"    {{ {op}, {op1}, {op2}, {op3} }}, // {comment}")
+            inst_lines.append(f"    {{ {op}, {size}, {op1}, {op2}, {op3} }}, // {comment}")
 
         bytecode_declarations.append(f"// VM Bytecode for {func_name}\nstatic vm_insn_t {array_name}[{array_size}] = {{\n" + ",\n".join(inst_lines) + "\n};")
 
@@ -68,6 +69,10 @@ long long {func_name}(long long arg0, long long arg1, long long arg2, long long 
     ctx.regs[5] = arg5;
     ctx.regs[6] = arg6;
     ctx.regs[7] = arg7;
+
+    // Setup isolated virtual stack to prevent host stack corruption
+    uint8_t vm_stack[16384] __attribute__((aligned(16)));
+    ctx.regs[31] = (uint64_t)&vm_stack[16368]; // Point virtual SP to top of aligned virtual stack
 
     // Initial PC
     ctx.pc = 0;

@@ -1,12 +1,8 @@
-INFO:     Started server process [19672]
+INFO:     Started server process [144624]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-INFO:     127.0.0.1:52144 - "POST /api/upload HTTP/1.1" 200 OK
-INFO:     127.0.0.1:43848 - "POST /api/disassemble HTTP/1.1" 200 OK
-INFO:     127.0.0.1:49638 - "POST /api/build HTTP/1.1" 200 OK
-INFO:     127.0.0.1:40244 - "GET /api/download/22c1ffaa-37e6-48c2-a0c0-cb95db67b457 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:36066 - "GET / HTTP/1.1" 200 OK
-INFO:     127.0.0.1:36072 - "POST /api/upload HTTP/1.1" 200 OK
-INFO:     127.0.0.1:36072 - "POST /api/disassemble HTTP/1.1" 200 OK
-INFO:     127.0.0.1:36072 - "POST /api/build HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58990 - "POST /api/upload HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59002 - "POST /api/build HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59018 - "GET /api/download/afb2d9ce-6349-4365-9bcd-02fd13ab5978 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55966 - "POST /api/disassemble HTTP/1.1" 200 OK

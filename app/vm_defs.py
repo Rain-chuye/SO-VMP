@@ -19,3 +19,7 @@ class VMOpcode(IntEnum):
     VM_BL = 14
     VM_RET = 15
     VM_HALT = 16
+    VM_B_LE = 17
+    VM_B_GE = 18
+    VM_LSL = 19
+    VM_LSR = 20
