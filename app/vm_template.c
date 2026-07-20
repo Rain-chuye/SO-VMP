@@ -3,7 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/ptrace.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
+#include <errno.h>
 
 // VM Opcode Definitions (Must match Python's VMOpcode)
 typedef enum {
@@ -47,28 +51,77 @@ typedef struct {
     uint32_t cpsr_v; // Overflow flag
 } vm_context_t;
 
-// Standard Anti-Debugger checks
-int detect_debugger() {
-    FILE *f = fopen("/proc/self/status", "r");
-    if (!f) return 0;
-    char line[128];
-    int tracer_pid = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "TracerPid:", 10) == 0) {
-            tracer_pid = atoi(&line[10]);
-            break;
+// Dynamic rolling XOR decryption for bytecode arrays
+void decrypt_bytecode(uint8_t *encrypted, uint8_t *decrypted, uint32_t size, uint8_t key) {
+    uint8_t current_key = key;
+    for (uint32_t i = 0; i < size; i++) {
+        decrypted[i] = encrypted[i] ^ current_key;
+        current_key = current_key + decrypted[i] + i; // rolling key based on ciphertext/plaintext
+    }
+}
+
+// Multi-layered Anti-Debugger and Hooking checks
+int perform_security_checks() {
+    // 1. Ptrace Traceme - Returns -1 if debugger is already attached
+    #ifndef PTRACE_TRACEME
+    #define PTRACE_TRACEME 0
+    #endif
+    if (ptrace(PTRACE_TRACEME, 0, 1, 0) < 0) {
+        if (errno != ENOSYS) {
+            printf("[VM Guardian] Anti-Debug Active: Ptrace attachment detected!\n");
+            return 1;
         }
     }
-    fclose(f);
-    return tracer_pid != 0;
+
+    // 2. TracerPid Scan from /proc/self/status
+    FILE *f = fopen("/proc/self/status", "r");
+    if (f) {
+        char line[128];
+        int tracer_pid = 0;
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "TracerPid:", 10) == 0) {
+                tracer_pid = atoi(&line[10]);
+                break;
+            }
+        }
+        fclose(f);
+        if (tracer_pid != 0) {
+            printf("[VM Guardian] Anti-Debug Active: TracerPid = %d detected!\n", tracer_pid);
+            return 1;
+        }
+    }
+
+    // 3. Scan memory maps for Frida / Hooking frameworks
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps) {
+        char line[512];
+        while (fgets(line, sizeof(line), maps)) {
+            // Check for typical Frida or substrate hook names
+            if (strstr(line, "frida") || strstr(line, "gum-js") || strstr(line, "libfrida")) {
+                printf("[VM Guardian] Security Violation: Hooking frame detected in memory maps!\n");
+                fclose(maps);
+                return 1;
+            }
+        }
+        fclose(maps);
+    }
+
+    return 0; // Security check passed
 }
 
 // VM Executor core loop
 void vm_execute(vm_insn_t *code, uint32_t num_instructions, vm_context_t *ctx) {
+    // Timing-based Anti-Debug setup
+    struct timeval start_time, end_time;
+    gettimeofday(&start_time, NULL);
+    uint32_t executed_instructions = 0;
+
     while (ctx->pc < num_instructions) {
         uint64_t current_pc = ctx->pc;
         vm_insn_t insn = code[ctx->pc++];
+        executed_instructions++;
 
+        // Debug output (comment out or keep for testing)
         printf("[VM_DBG] PC: %02llu | OP: %d | Size: %d | Op1: %llu, Op2: %llu, Op3: %llu\n",
                (unsigned long long)current_pc, insn.op, insn.size,
                (unsigned long long)insn.op1, (unsigned long long)insn.op2, (unsigned long long)insn.op3);
@@ -79,25 +132,21 @@ void vm_execute(vm_insn_t *code, uint32_t num_instructions, vm_context_t *ctx) {
             case VM_ADD: {
                 uint64_t val2 = ctx->regs[insn.op2];
                 uint64_t val3 = (insn.op3 & 0x80000000) ? (insn.op3 & 0x7FFFFFFF) : ctx->regs[insn.op3];
-                // Handle 32-bit vs 64-bit addition sizing
                 if (insn.size == 4) {
                     ctx->regs[insn.op1] = (uint32_t)(val2 + val3);
                 } else {
                     ctx->regs[insn.op1] = val2 + val3;
                 }
-                printf("[VM_DBG]   ADD output reg[%llu] = %lld\n", (unsigned long long)insn.op1, (long long)ctx->regs[insn.op1]);
                 break;
             }
             case VM_SUB: {
                 uint64_t val2 = ctx->regs[insn.op2];
                 uint64_t val3 = (insn.op3 & 0x80000000) ? (insn.op3 & 0x7FFFFFFF) : ctx->regs[insn.op3];
-                // Handle 32-bit vs 64-bit subtraction sizing
                 if (insn.size == 4) {
                     ctx->regs[insn.op1] = (uint32_t)(val2 - val3);
                 } else {
                     ctx->regs[insn.op1] = val2 - val3;
                 }
-                printf("[VM_DBG]   SUB output reg[%llu] = %lld\n", (unsigned long long)insn.op1, (long long)ctx->regs[insn.op1]);
                 break;
             }
             case VM_MOV: {
@@ -107,7 +156,6 @@ void vm_execute(vm_insn_t *code, uint32_t num_instructions, vm_context_t *ctx) {
                 } else {
                     ctx->regs[insn.op1] = val;
                 }
-                printf("[VM_DBG]   MOV output reg[%llu] = %lld\n", (unsigned long long)insn.op1, (long long)ctx->regs[insn.op1]);
                 break;
             }
             case VM_CMP: {
@@ -123,23 +171,19 @@ void vm_execute(vm_insn_t *code, uint32_t num_instructions, vm_context_t *ctx) {
                     ctx->cpsr_z = (diff == 0) ? 1 : 0;
                     ctx->cpsr_n = (diff < 0) ? 1 : 0;
                 }
-                printf("[VM_DBG]   CMP output CPSR_Z=%d, CPSR_N=%d\n", ctx->cpsr_z, ctx->cpsr_n);
                 break;
             }
             case VM_LDR: {
                 uint64_t addr = ctx->regs[insn.op2] + insn.op3;
-                printf("[VM_DBG]   LDR from address: %p (Base: %p, Offset: %lld)\n", (void*)addr, (void*)ctx->regs[insn.op2], (long long)insn.op3);
                 if (insn.size == 4) {
                     ctx->regs[insn.op1] = *(uint32_t*)addr;
                 } else {
                     ctx->regs[insn.op1] = *(uint64_t*)addr;
                 }
-                printf("[VM_DBG]   LDR output reg[%llu] = %lld\n", (unsigned long long)insn.op1, (long long)ctx->regs[insn.op1]);
                 break;
             }
             case VM_STR: {
                 uint64_t addr = ctx->regs[insn.op2] + insn.op3;
-                printf("[VM_DBG]   STR to address: %p (Base: %p, Offset: %lld)\n", (void*)addr, (void*)ctx->regs[insn.op2], (long long)insn.op3);
                 if (insn.size == 4) {
                     *(uint32_t*)addr = (uint32_t)ctx->regs[insn.op1];
                 } else {
@@ -149,48 +193,41 @@ void vm_execute(vm_insn_t *code, uint32_t num_instructions, vm_context_t *ctx) {
             }
             case VM_B: {
                 ctx->pc = insn.op1;
-                printf("[VM_DBG]   B jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 break;
             }
             case VM_B_EQ: {
                 if (ctx->cpsr_z == 1) {
                     ctx->pc = insn.op1;
-                    printf("[VM_DBG]   B_EQ jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 }
                 break;
             }
             case VM_B_NE: {
                 if (ctx->cpsr_z == 0) {
                     ctx->pc = insn.op1;
-                    printf("[VM_DBG]   B_NE jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 }
                 break;
             }
             case VM_B_GT: {
                 if (ctx->cpsr_z == 0 && ctx->cpsr_n == 0) {
                     ctx->pc = insn.op1;
-                    printf("[VM_DBG]   B_GT jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 }
                 break;
             }
             case VM_B_LT: {
                 if (ctx->cpsr_n == 1) {
                     ctx->pc = insn.op1;
-                    printf("[VM_DBG]   B_LT jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 }
                 break;
             }
             case VM_B_LE: {
                 if (ctx->cpsr_z == 1 || ctx->cpsr_n == 1) {
                     ctx->pc = insn.op1;
-                    printf("[VM_DBG]   B_LE jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 }
                 break;
             }
             case VM_B_GE: {
                 if (ctx->cpsr_n == 0) {
                     ctx->pc = insn.op1;
-                    printf("[VM_DBG]   B_GE jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 }
                 break;
             }
@@ -202,7 +239,6 @@ void vm_execute(vm_insn_t *code, uint32_t num_instructions, vm_context_t *ctx) {
                 } else {
                     ctx->regs[insn.op1] = val2 << val3;
                 }
-                printf("[VM_DBG]   LSL output reg[%llu] = %lld\n", (unsigned long long)insn.op1, (long long)ctx->regs[insn.op1]);
                 break;
             }
             case VM_LSR: {
@@ -213,38 +249,41 @@ void vm_execute(vm_insn_t *code, uint32_t num_instructions, vm_context_t *ctx) {
                 } else {
                     ctx->regs[insn.op1] = val2 >> val3;
                 }
-                printf("[VM_DBG]   LSR output reg[%llu] = %lld\n", (unsigned long long)insn.op1, (long long)ctx->regs[insn.op1]);
                 break;
             }
             case VM_CBZ: {
                 if (ctx->regs[insn.op1] == 0) {
                     ctx->pc = insn.op2;
-                    printf("[VM_DBG]   CBZ jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 }
                 break;
             }
             case VM_CBNZ: {
                 if (ctx->regs[insn.op1] != 0) {
                     ctx->pc = insn.op2;
-                    printf("[VM_DBG]   CBNZ jumped PC to %llu\n", (unsigned long long)ctx->pc);
                 }
                 break;
             }
             case VM_BL: {
                 ctx->regs[30] = ctx->pc; // LR holds return IP index
                 ctx->pc = insn.op1;
-                printf("[VM_DBG]   BL jumped PC to %llu (saved LR=%llu)\n", (unsigned long long)ctx->pc, (unsigned long long)ctx->regs[30]);
                 break;
             }
             case VM_RET: {
                 ctx->pc = ctx->regs[insn.op1]; // typically lr (30)
-                printf("[VM_DBG]   RET returned PC to %llu\n", (unsigned long long)ctx->pc);
                 return; // Return from VM Execution
             }
             case VM_HALT:
             default:
-                printf("[VM_DBG]   HALT!\n");
                 return;
         }
+    }
+
+    // 4. Timing-based Anti-Debug validation
+    gettimeofday(&end_time, NULL);
+    double elapsed_ms = (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_usec - start_time.tv_usec) / 1000.0;
+    // If average execution time per VM instruction is > 5ms, a debugger is likely tracing / stepping!
+    if (executed_instructions > 0 && (elapsed_ms / executed_instructions) > 5.0) {
+        printf("[VM Guardian] Anti-Debug Active: High latency debug stepping detected!\n");
+        abort();
     }
 }

@@ -1,24 +1,40 @@
 import os
+import struct
+import random
 import subprocess
 import tempfile
 from app.vm_defs import VMOpcode
+
+def encrypt_bytecode_rolling(insns, key):
+    # Pack instructions into a continuous little-endian byte array
+    # vm_insn_t: 32 bytes total (uint32_t op, uint32_t size, uint64_t op1, uint64_t op2, uint64_t op3)
+    raw_bytes = bytearray()
+    for ins in insns:
+        raw_bytes.extend(struct.pack('<IIQQQ', ins['op'], ins['size'], ins['op1'], ins['op2'], ins['op3']))
+
+    encrypted = bytearray()
+    current_key = key
+    for i, b in enumerate(raw_bytes):
+        enc_b = b ^ current_key
+        encrypted.append(enc_b)
+        current_key = (current_key + b + i) & 0xFF
+
+    return encrypted
 
 def generate_virtualized_so(arch: str, selected_funcs: list, original_so_path: str):
     """
     Generates a new C file combining:
     1. The core VM loader/interpreter
-    2. The translated functions represented as VM bytecodes
+    2. The encrypted function bytecode represented as static uint8_t arrays
     3. Re-exposes the selected exported functions under their original names.
     4. Anti-debug triggers that prompt abort() if TracerPid is active.
 
     Then cross-compiles it to a new SO library.
     """
-    # Load the VM core source template
     template_path = os.path.join(os.path.dirname(__file__), "vm_template.c")
     with open(template_path, "r") as f:
         vm_template_src = f.read()
 
-    # Generate custom VM code tables for selected functions
     bytecode_declarations = []
     function_definitions = []
 
@@ -26,37 +42,47 @@ def generate_virtualized_so(arch: str, selected_funcs: list, original_so_path: s
         func_name = func['name']
         instructions = func['instructions'] # List of VM instructions
 
-        # Build instruction array definition
-        array_name = f"vm_code_{idx}"
-        array_size = len(instructions)
+        # Generate random rolling XOR key
+        xor_key = random.randint(1, 254)
 
-        inst_lines = []
-        for inst in instructions:
-            op = inst['op']
-            size = inst['size']
-            op1 = inst['op1']
-            op2 = inst['op2']
-            op3 = inst['op3']
-            comment = inst['comment'].replace("*/", "* /") # prevent nested comments
-            inst_lines.append(f"    {{ {op}, {size}, {op1}, {op2}, {op3} }}, // {comment}")
+        # Encrypt the instructions
+        enc_bytes = encrypt_bytecode_rolling(instructions, xor_key)
 
-        bytecode_declarations.append(f"// VM Bytecode for {func_name}\nstatic vm_insn_t {array_name}[{array_size}] = {{\n" + ",\n".join(inst_lines) + "\n};")
+        # Formulate hex array representation
+        hex_lines = []
+        for i in range(0, len(enc_bytes), 16):
+            chunk = enc_bytes[i:i+16]
+            hex_lines.append("    " + ", ".join(f"0x{b:02x}" for b in chunk))
 
-        # Build standard JNI function wrapper or standard exported symbol wrapper
-        # The wrapper initializes the VM context, copies input registers (x0-x7 on ARM64) and executes VM
+        array_name = f"vm_code_enc_{idx}"
+        array_size_bytes = len(enc_bytes)
+        num_instructions = len(instructions)
+
+        bytecode_declarations.append(f"""
+// Encrypted bytecode array for {func_name} (Size: {array_size_bytes} bytes, Key: {xor_key})
+static const uint8_t {array_name}[{array_size_bytes}] = {{
+{",\n".join(hex_lines)}
+}};
+""")
+
+        # Build JNI/symbol wrapper that dynamically decrypts and zeroes bytecode on stack
         func_def = f"""
-// Exported virtualized function: {func_name}
+// Exported virtualized function with dynamic decryption: {func_name}
 __attribute__((visibility("default")))
 long long {func_name}(long long arg0, long long arg1, long long arg2, long long arg3,
                      long long arg4, long long arg5, long long arg6, long long arg7) {{
 
     // 1. Runtime Anti-Debugger check
-    if (detect_debugger()) {{
-        printf("[VM Guardian] Debugger detected! Exiting execution.\\n");
+    if (perform_security_checks()) {{
+        printf("[VM Guardian] Security violation detected! Exiting execution.\\n");
         abort();
     }}
 
-    // 2. Setup VM context
+    // 2. Dynamic Stack Decryption
+    vm_insn_t decrypted_code[{num_instructions}];
+    decrypt_bytecode((uint8_t*){array_name}, (uint8_t*)decrypted_code, {array_size_bytes}, {xor_key});
+
+    // 3. Setup VM context
     vm_context_t ctx;
     memset(&ctx, 0, sizeof(ctx));
 
@@ -77,8 +103,11 @@ long long {func_name}(long long arg0, long long arg1, long long arg2, long long 
     // Initial PC
     ctx.pc = 0;
 
-    // 3. Launch VM
-    vm_execute({array_name}, {array_size}, &ctx);
+    // 4. Launch VM
+    vm_execute(decrypted_code, {num_instructions}, &ctx);
+
+    // 5. Zero out decrypted bytecode traces in stack memory
+    memset(decrypted_code, 0, sizeof(decrypted_code));
 
     // Return x0
     return ctx.regs[0];
