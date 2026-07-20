@@ -1,16 +1,12 @@
-INFO:     Started server process [261947]
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [261947]
+INFO:     Started server process [346505]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-INFO:     127.0.0.1:38610 - "POST /api/upload HTTP/1.1" 200 OK
-INFO:     127.0.0.1:38620 - "POST /api/build HTTP/1.1" 200 OK
-INFO:     127.0.0.1:38634 - "GET /api/download/b29d597b-b279-420c-b43a-42df688cb5ee HTTP/1.1" 200 OK
-INFO:     127.0.0.1:40552 - "POST /api/upload HTTP/1.1" 200 OK
-INFO:     127.0.0.1:40568 - "POST /api/build HTTP/1.1" 200 OK
-INFO:     127.0.0.1:40584 - "GET /api/download/2e84ddff-eeaf-47fa-bdc6-3460bb8b3997 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:49144 - "POST /api/upload HTTP/1.1" 200 OK
-INFO:     127.0.0.1:49154 - "POST /api/build HTTP/1.1" 200 OK
-INFO:     127.0.0.1:49170 - "GET /api/download/d2baed70-fb9c-4fa0-a93e-59fba7214fd6 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:55640 - "POST /api/upload HTTP/1.1" 200 OK
-INFO:     127.0.0.1:55654 - "POST /api/build HTTP/1.1" 200 OK
-INFO:     127.0.0.1:55662 - "GET /api/download/b51b5f0c-64fa-460e-8e86-e7dcdc7c2b96 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32950 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     127.0.0.1:35266 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42642 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45270 - "GET / HTTP/1.1" 200 OK
