@@ -23,3 +23,15 @@ class VMOpcode(IntEnum):
     VM_B_GE = 18
     VM_LSL = 19
     VM_LSR = 20
+
+    # Advanced Stack-based and JNI/System Opcodes
+    VM_PUSH = 21
+    VM_POP = 22
+    VM_LOAD = 23
+    VM_STORE = 24
+    VM_SVC = 25       # Virtual Service Call for JNI/System
+    VM_BLR = 26       # Indirect Branch and Link
+    VM_MUL = 27
+    VM_DIV = 28
+    VM_AND = 29
+    VM_OR = 30

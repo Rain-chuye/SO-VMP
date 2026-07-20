@@ -8,6 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <errno.h>
+#include <dlfcn.h>
 
 // JNI Types and Structs for libluajava.so dynamic JNI registration support
 typedef void* JNIEnv;
@@ -22,31 +23,6 @@ typedef struct {
     const char* signature;
     void*       fnPtr;
 } JNINativeMethod;
-
-// VM Opcode Definitions (Must match Python's VMOpcode)
-typedef enum {
-    VM_NOP = 0,
-    VM_ADD = 1,
-    VM_SUB = 2,
-    VM_LDR = 3,
-    VM_STR = 4,
-    VM_MOV = 5,
-    VM_CMP = 6,
-    VM_B = 7,
-    VM_B_EQ = 8,
-    VM_B_NE = 9,
-    VM_B_GT = 10,
-    VM_B_LT = 11,
-    VM_CBZ = 12,
-    VM_CBNZ = 13,
-    VM_BL = 14,
-    VM_RET = 15,
-    VM_HALT = 16,
-    VM_B_LE = 17,
-    VM_B_GE = 18,
-    VM_LSL = 19,
-    VM_LSR = 20
-} vm_opcode_t;
 
 typedef struct {
     uint32_t op;
@@ -63,6 +39,9 @@ typedef struct {
     uint32_t cpsr_n; // Negative flag
     uint32_t cpsr_c; // Carry flag
     uint32_t cpsr_v; // Overflow flag
+    uint64_t pointer_xor_key; // XOR Key for lua_State* pointer obfuscation
+    uint64_t vm_stack_ptr;    // Stack pointer for stack-based execution
+    uint64_t vm_stack_mem[512]; // Internal Stack-based VM memory
 } vm_context_t;
 
 // Dynamic rolling XOR decryption for bytecode arrays
@@ -71,6 +50,41 @@ void decrypt_bytecode(uint8_t *encrypted, uint8_t *decrypted, uint32_t size, uin
     for (uint32_t i = 0; i < size; i++) {
         decrypted[i] = encrypted[i] ^ current_key;
         current_key = current_key + decrypted[i] + i; // rolling key based on ciphertext/plaintext
+    }
+}
+
+// Find the loaded base address of libprotected.so contiguously in memory maps safely
+void* find_self_base_address() {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) return NULL;
+
+    char line[512];
+    uintptr_t base_addr = 0;
+    while (fgets(line, sizeof(line), maps)) {
+        if (strstr(line, "libprotected.so")) {
+            // Parse starting hex address of first PT_LOAD segment of libprotected.so
+            if (sscanf(line, "%lx-", &base_addr) == 1) {
+                break;
+            }
+        }
+    }
+    fclose(maps);
+    return (void*)base_addr;
+}
+
+// In-Memory ELF Header zeroing to prevent runtime Memory Dump
+void anti_dump_zero_elf_header() {
+    void* base_addr = find_self_base_address();
+    if (!base_addr) return;
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    void* page_start = (void*)((uintptr_t)base_addr & ~(page_size - 1));
+
+    // Set page to writable AND executable to allow dynamic zeroing without execution fault
+    if (mprotect(page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        memset(base_addr, 0, 64); // Overwrite first 64 bytes of ELF Header
+        mprotect(page_start, page_size, PROT_READ | PROT_EXEC); // Restore protection
+        printf("[VM Guardian] Anti-Dump: In-memory ELF header successfully zeroed out!\n");
     }
 }
 
@@ -110,8 +124,8 @@ int perform_security_checks() {
     if (maps) {
         char line[512];
         while (fgets(line, sizeof(line), maps)) {
-            // Check for typical Frida or substrate hook names
-            if (strstr(line, "frida") || strstr(line, "gum-js") || strstr(line, "libfrida")) {
+            // Check for typical Frida or substrate hook names (exclude libprotected.so itself!)
+            if (!strstr(line, "libprotected.so") && (strstr(line, "frida") || strstr(line, "gum-js") || strstr(line, "libfrida"))) {
                 printf("[VM Guardian] Security Violation: Hooking frame detected in memory maps!\n");
                 fclose(maps);
                 return 1;
@@ -121,183 +135,4 @@ int perform_security_checks() {
     }
 
     return 0; // Security check passed
-}
-
-// VM Executor core loop
-void vm_execute(vm_insn_t *code, uint32_t num_instructions, vm_context_t *ctx) {
-    // Timing-based Anti-Debug setup
-    struct timeval start_time, end_time;
-    gettimeofday(&start_time, NULL);
-    uint32_t executed_instructions = 0;
-
-    while (ctx->pc < num_instructions) {
-        uint64_t current_pc = ctx->pc;
-        vm_insn_t insn = code[ctx->pc++];
-        executed_instructions++;
-
-        // Debug output (comment out or keep for testing)
-        printf("[VM_DBG] PC: %02llu | OP: %d | Size: %d | Op1: %llu, Op2: %llu, Op3: %llu\n",
-               (unsigned long long)current_pc, insn.op, insn.size,
-               (unsigned long long)insn.op1, (unsigned long long)insn.op2, (unsigned long long)insn.op3);
-
-        switch (insn.op) {
-            case VM_NOP:
-                break;
-            case VM_ADD: {
-                uint64_t val2 = ctx->regs[insn.op2];
-                uint64_t val3 = (insn.op3 & 0x80000000) ? (insn.op3 & 0x7FFFFFFF) : ctx->regs[insn.op3];
-                if (insn.size == 4) {
-                    ctx->regs[insn.op1] = (uint32_t)(val2 + val3);
-                } else {
-                    ctx->regs[insn.op1] = val2 + val3;
-                }
-                break;
-            }
-            case VM_SUB: {
-                uint64_t val2 = ctx->regs[insn.op2];
-                uint64_t val3 = (insn.op3 & 0x80000000) ? (insn.op3 & 0x7FFFFFFF) : ctx->regs[insn.op3];
-                if (insn.size == 4) {
-                    ctx->regs[insn.op1] = (uint32_t)(val2 - val3);
-                } else {
-                    ctx->regs[insn.op1] = val2 - val3;
-                }
-                break;
-            }
-            case VM_MOV: {
-                uint64_t val = (insn.op3 == 1) ? insn.op2 : ctx->regs[insn.op2];
-                if (insn.size == 4) {
-                    ctx->regs[insn.op1] = (uint32_t)val;
-                } else {
-                    ctx->regs[insn.op1] = val;
-                }
-                break;
-            }
-            case VM_CMP: {
-                uint64_t val1 = ctx->regs[insn.op1];
-                uint64_t val2 = (insn.op3 == 1) ? insn.op2 : ctx->regs[insn.op2];
-
-                if (insn.size == 4) {
-                    int32_t diff = (int32_t)val1 - (int32_t)val2;
-                    ctx->cpsr_z = (diff == 0) ? 1 : 0;
-                    ctx->cpsr_n = (diff < 0) ? 1 : 0;
-                } else {
-                    int64_t diff = (int64_t)val1 - (int64_t)val2;
-                    ctx->cpsr_z = (diff == 0) ? 1 : 0;
-                    ctx->cpsr_n = (diff < 0) ? 1 : 0;
-                }
-                break;
-            }
-            case VM_LDR: {
-                uint64_t addr = ctx->regs[insn.op2] + insn.op3;
-                if (insn.size == 4) {
-                    ctx->regs[insn.op1] = *(uint32_t*)addr;
-                } else {
-                    ctx->regs[insn.op1] = *(uint64_t*)addr;
-                }
-                break;
-            }
-            case VM_STR: {
-                uint64_t addr = ctx->regs[insn.op2] + insn.op3;
-                if (insn.size == 4) {
-                    *(uint32_t*)addr = (uint32_t)ctx->regs[insn.op1];
-                } else {
-                    *(uint64_t*)addr = ctx->regs[insn.op1];
-                }
-                break;
-            }
-            case VM_B: {
-                ctx->pc = insn.op1;
-                break;
-            }
-            case VM_B_EQ: {
-                if (ctx->cpsr_z == 1) {
-                    ctx->pc = insn.op1;
-                }
-                break;
-            }
-            case VM_B_NE: {
-                if (ctx->cpsr_z == 0) {
-                    ctx->pc = insn.op1;
-                }
-                break;
-            }
-            case VM_B_GT: {
-                if (ctx->cpsr_z == 0 && ctx->cpsr_n == 0) {
-                    ctx->pc = insn.op1;
-                }
-                break;
-            }
-            case VM_B_LT: {
-                if (ctx->cpsr_n == 1) {
-                    ctx->pc = insn.op1;
-                }
-                break;
-            }
-            case VM_B_LE: {
-                if (ctx->cpsr_z == 1 || ctx->cpsr_n == 1) {
-                    ctx->pc = insn.op1;
-                }
-                break;
-            }
-            case VM_B_GE: {
-                if (ctx->cpsr_n == 0) {
-                    ctx->pc = insn.op1;
-                }
-                break;
-            }
-            case VM_LSL: {
-                uint64_t val2 = ctx->regs[insn.op2];
-                uint64_t val3 = (insn.op3 & 0x80000000) ? (insn.op3 & 0x7FFFFFFF) : ctx->regs[insn.op3];
-                if (insn.size == 4) {
-                    ctx->regs[insn.op1] = (uint32_t)(val2 << val3);
-                } else {
-                    ctx->regs[insn.op1] = val2 << val3;
-                }
-                break;
-            }
-            case VM_LSR: {
-                uint64_t val2 = ctx->regs[insn.op2];
-                uint64_t val3 = (insn.op3 & 0x80000000) ? (insn.op3 & 0x7FFFFFFF) : ctx->regs[insn.op3];
-                if (insn.size == 4) {
-                    ctx->regs[insn.op1] = (uint32_t)(val2 >> val3);
-                } else {
-                    ctx->regs[insn.op1] = val2 >> val3;
-                }
-                break;
-            }
-            case VM_CBZ: {
-                if (ctx->regs[insn.op1] == 0) {
-                    ctx->pc = insn.op2;
-                }
-                break;
-            }
-            case VM_CBNZ: {
-                if (ctx->regs[insn.op1] != 0) {
-                    ctx->pc = insn.op2;
-                }
-                break;
-            }
-            case VM_BL: {
-                ctx->regs[30] = ctx->pc; // LR holds return IP index
-                ctx->pc = insn.op1;
-                break;
-            }
-            case VM_RET: {
-                ctx->pc = ctx->regs[insn.op1]; // typically lr (30)
-                return; // Return from VM Execution
-            }
-            case VM_HALT:
-            default:
-                return;
-        }
-    }
-
-    // 4. Timing-based Anti-Debug validation
-    gettimeofday(&end_time, NULL);
-    double elapsed_ms = (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_usec - start_time.tv_usec) / 1000.0;
-    // If average execution time per VM instruction is > 5ms, a debugger is likely tracing / stepping!
-    if (executed_instructions > 0 && (elapsed_ms / executed_instructions) > 5.0) {
-        printf("[VM Guardian] Anti-Debug Active: High latency debug stepping detected!\n");
-        abort();
-    }
 }
