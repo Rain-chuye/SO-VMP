@@ -9,6 +9,20 @@
 #include <unistd.h>
 #include <errno.h>
 
+// JNI Types and Structs for libluajava.so dynamic JNI registration support
+typedef void* JNIEnv;
+typedef void* jobject;
+typedef void* jclass;
+typedef void* jstring;
+typedef int jint;
+typedef void* JavaVM;
+
+typedef struct {
+    const char* name;
+    const char* signature;
+    void*       fnPtr;
+} JNINativeMethod;
+
 // VM Opcode Definitions (Must match Python's VMOpcode)
 typedef enum {
     VM_NOP = 0,
